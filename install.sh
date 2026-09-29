@@ -48,4 +48,4 @@ for dir in "$GAME" "$SHIP" "$PFX"; do
 done
 echo
 echo "In Steam, set this launch option for Minecraft Dungeons II:"
-echo '  WINEDLLOVERRIDES="xgameruntime=n" %command%'
+echo '  WINEDLLOVERRIDES="xgameruntime=n"'
