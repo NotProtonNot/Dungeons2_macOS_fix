@@ -9,6 +9,9 @@ if [ ! -f "$DLL" ]; then
     exit 1
 fi
 
+if [ -z "${STEAM_ROOT:-}" ] && [ "$(uname -s)" = Darwin ]; then
+    STEAM_ROOT="$HOME/Library/Application Support/Steam"
+fi
 STEAM_ROOT=${STEAM_ROOT:-$HOME/.local/share/Steam}
 if [ ! -f "$STEAM_ROOT/steamapps/libraryfolders.vdf" ] && [ -f "$HOME/.steam/steam/steamapps/libraryfolders.vdf" ]; then
     STEAM_ROOT=$HOME/.steam/steam
@@ -19,10 +22,10 @@ if [ ! -f "$VDF" ]; then
     exit 1
 fi
 
-LIB=$(awk '
-    /"path"/ {
-        gsub(/"/, "", $2)
-        path = $2
+# -F'"' so library paths with spaces survive (macOS "Application Support")
+LIB=$(awk -F'"' '
+    $2 == "path" {
+        path = $4
         manifest = path "/steamapps/appmanifest_'"$APPID"'.acf"
         if (system("test -f \"" manifest "\"") == 0) { print path; exit }
     }
