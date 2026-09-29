@@ -1482,11 +1482,42 @@ static DWORD WINAPI auth_prompt(void *unused)
     }
     snprintf(msg, sizeof msg, "Sign in with your Microsoft account.\n\n%s\nCode: %s", url, code);
     xlog("microsoft login code %s", code);
-    MessageBoxA(NULL, msg, "Minecraft Dungeons II sign-in", MB_OK | MB_SETFOREGROUND);
+    MessageBoxA(NULL, msg, "Minecraft Dungeons II sign-in",
+                MB_OK | MB_SETFOREGROUND | MB_TOPMOST | MB_SYSTEMMODAL);
     return 0;
 }
 
+static SRWLOCK g_auth_lock = SRWLOCK_INIT;
+
+static int auth_ensure_locked(void);
+
 static int auth_ensure(void)
+{
+    int ok;
+    AcquireSRWLockExclusive(&g_auth_lock);
+    ok = auth_ensure_locked();
+    ReleaseSRWLockExclusive(&g_auth_lock);
+    return ok;
+}
+
+static DWORD WINAPI auth_background(void *unused)
+{
+    (void)unused;
+    auth_ensure();
+    return 0;
+}
+
+static void auth_kickoff(void)
+{
+    static LONG started;
+    HANDLE t;
+    if (InterlockedExchange(&started, 1)) return;
+    if (auth_read_file()) return;
+    t = CreateThread(NULL, 0, auth_background, NULL, 0, NULL);
+    if (t) CloseHandle(t);
+}
+
+static int auth_ensure_locked(void)
 {
     STARTUPINFOA si;
     PROCESS_INFORMATION pi;
@@ -1575,6 +1606,7 @@ static HRESULT WINAPI user_add_async(void *self, UINT32 options, XAsyncBlock *as
     HRESULT hr;
     (void)self;
     xlog("XUserAddAsync opts=%lu", (unsigned long)options);
+    auth_kickoff();
     if (!async) return E_INVALIDARG_;
     st = calloc(1, sizeof(*st));
     if (!st) return E_FAIL_;
