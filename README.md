@@ -2,9 +2,7 @@
 
 **AI USAGE NOTE: This is a fork of Kubas556's Minecraft Dungeons II fix for Linux. That fix appears, to my eyes, to be end-to-end vibe coded and was commited by Cursor Agent. I forked it, fixed major problems with it (online sign in was broken in their version) and adapted it to work on macOS. As the original code was made by AI, this fix is not suitable for upstream.**
 
-A local 'stand in' for Microsoft Gaming Services so Minecraft Dungeons II (Steam app `1912410`) can run under CrossOver. The game looks for `xgameruntime.dll`. This repository builds a replacement for that library. It does not modify the game and it does not include Microsoft's library. 
-
-On first launch it signs you in with your own Microsoft account through the normal device-code page at <https://www.microsoft.com/link>, then caches the Xbox tokens in `tokens.txt`. Later launches reuse that cache until it expires.
+A local 'stand in' for Microsoft Gaming Services so Minecraft Dungeons II (Steam app `1912410`) can run under CrossOver. The game looks for `xgameruntime.dll`, which is a GDK component that is not present under Linux. Some GDK games ship with deliberate Proton/Wine compatibility, this one rudely does not. So this is a replacement for it.
 
 ## Install
 
@@ -35,13 +33,11 @@ You may also want to delete the 'GamingRepair' EXE that the game comes with, as 
 
 ## First sign-in
 
-Start the game from Steam. A window shows a code and opens <https://www.microsoft.com/link>. Enter the code, then sign in with the Microsoft account that should own the Xbox profile. Leave that page as `https://www.microsoft.com/link` with no extra query string.
+Start the game from Steam. A window shows a code and opens <https://www.microsoft.com/link>. Enter the code, then sign in with the Microsoft account that you want to use.
 
-The token file is `~/.local/share/dungeons2-compat/tokens.txt` (mode `0600`, in a `0700` directory). If the repository isn't cloned there, it's `drive_c/users/steamuser/AppData/Local/Dungeons2/tokens.txt` inside the game's Wine prefix instead. Do not share it. When it expires, the next launch refreshes it or asks you to sign in again.
+## Building instructions
 
-## Rebuild
-
-The DLL already in `src/` is ready to install. To build it yourself you need the MinGW-w64 cross compiler (`brew install mingw-w64`):
+To build it yourself you need the MinGW-w64 cross compiler (`brew install mingw-w64`):
 
 ```sh
 x86_64-w64-mingw32-gcc -shared -O2 -Wall -Wextra -o src/xgameruntime.dll src/xgameruntime.c src/xauth.c -lwinhttp -lbcrypt
