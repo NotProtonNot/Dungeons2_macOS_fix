@@ -697,6 +697,9 @@ static HRESULT WINAPI thr_Begin(void *self, XAsyncBlock *async, void *context, c
     (void)self;
     if (!async || !provider) return E_INVALIDARG_;
     if (state_of(async)) return E_INVALIDARG_;
+    /* Real XAsyncBegin swaps a NULL queue for the process queue before the
+     * provider runs. libHttpClient asserts on it (NetworkState.cpp). */
+    if (!async->queue) async->queue = process_queue();
     st = calloc(1, sizeof(*st));
     if (!st) return E_FAIL_;
     st->magic = ASYNC_MAGIC;
