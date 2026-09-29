@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "xauth.h"
+
 #define E_NOTIMPL_      ((HRESULT)0x80004001)
 #define E_NOINTERFACE_  ((HRESULT)0x80004002)
 #define E_POINTER_      ((HRESULT)0x80004003)
@@ -1376,11 +1378,11 @@ static void auth_apply_line(char *line)
     else if (!strcmp(line, "msa")) snprintf(g_msa_token, sizeof g_msa_token, "%s", val);
 }
 
+#define APPDATA_DIR "C:\\users\\steamuser\\AppData\\Local\\Dungeons2"
+#define APPDATA_TOKENS APPDATA_DIR "\\tokens.txt"
+
 static char g_compat_unix[360];
 static char g_token_z[420];
-static char g_code_z[420];
-static char g_err_z[420];
-static char g_auth_cmd[700];
 
 static int home_from_winehomedir(char *out, size_t outsz)
 {
@@ -1406,7 +1408,7 @@ static void compat_paths(void)
     char homebuf[240];
     char wine[400];
     size_t i, j;
-    if (g_auth_cmd[0]) return;
+    if (g_token_z[0]) return;
     if ((!home || home[0] != '/') && home_from_winehomedir(homebuf, sizeof homebuf))
         home = homebuf;
     if (!home || home[0] != '/') {
@@ -1428,12 +1430,6 @@ static void compat_paths(void)
         wine[j++] = (g_compat_unix[i] == '/') ? '\\' : g_compat_unix[i];
     wine[j] = 0;
     snprintf(g_token_z, sizeof g_token_z, "%s\\tokens.txt", wine);
-    snprintf(g_code_z, sizeof g_code_z, "%s\\login-code.txt", wine);
-    snprintf(g_err_z, sizeof g_err_z, "%s\\login-error.txt", wine);
-    /* Wine execs non-PE images as native binaries through CreateProcess.
-     * start.exe /unix goes through ShellExecute, which CrossOver drops */
-    snprintf(g_auth_cmd, sizeof g_auth_cmd,
-             "\"Z:\\usr\\bin\\python3\" \"%s/xauth.py\"", g_compat_unix);
 }
 
 static int auth_read_file(void)
@@ -1443,7 +1439,7 @@ static int auth_read_file(void)
     char line[16000];
     int i;
     compat_paths();
-    paths[0] = "C:\\users\\steamuser\\AppData\\Local\\Dungeons2\\tokens.txt";
+    paths[0] = APPDATA_TOKENS;
     paths[1] = g_token_z;
     for (i = 0; i < 2 && !f; i++) f = fopen(paths[i], "r");
     if (!f) {
@@ -1467,24 +1463,44 @@ static int auth_read_file(void)
     return g_auth_loaded;
 }
 
+static char g_login_msg[400];
+
 static DWORD WINAPI auth_prompt(void *unused)
 {
-    FILE *f;
-    char url[256], code[64], msg[400];
     (void)unused;
-    compat_paths();
-    f = fopen(g_code_z, "r");
-    url[0] = code[0] = 0;
-    if (f) {
-        fgets(url, sizeof url, f);
-        fgets(code, sizeof code, f);
-        fclose(f);
-    }
-    snprintf(msg, sizeof msg, "Sign in with your Microsoft account.\n\n%s\nCode: %s", url, code);
-    xlog("microsoft login code %s", code);
-    MessageBoxA(NULL, msg, "Minecraft Dungeons II sign-in",
+    MessageBoxA(NULL, g_login_msg, "Minecraft Dungeons II sign-in",
                 MB_OK | MB_SETFOREGROUND | MB_TOPMOST | MB_SYSTEMMODAL);
     return 0;
+}
+
+static void auth_show_code(const char *url, const char *code)
+{
+    HANDLE t;
+    snprintf(g_login_msg, sizeof g_login_msg,
+             "Sign in with your Microsoft account.\n\n%s\nCode: %s", url, code);
+    xlog("microsoft login code %s", code);
+    t = CreateThread(NULL, 0, auth_prompt, NULL, 0, NULL);
+    if (t) CloseHandle(t);
+}
+
+static void auth_log(const char *msg) { xlog("%s", msg); }
+
+/* Same order auth_read_file reads: AppData copy, else the clone directory,
+ * else a new AppData copy when there's no clone */
+static const char *auth_write_path(void)
+{
+    char dir[sizeof g_token_z];
+    char *slash;
+    DWORD attr;
+    compat_paths();
+    if (GetFileAttributesA(APPDATA_TOKENS) != INVALID_FILE_ATTRIBUTES) return APPDATA_TOKENS;
+    snprintf(dir, sizeof dir, "%s", g_token_z);
+    slash = strrchr(dir, '\\');
+    if (slash) *slash = 0;
+    attr = GetFileAttributesA(dir);
+    if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) return g_token_z;
+    CreateDirectoryA(APPDATA_DIR, NULL);
+    return APPDATA_TOKENS;
 }
 
 static SRWLOCK g_auth_lock = SRWLOCK_INIT;
@@ -1519,45 +1535,28 @@ static void auth_kickoff(void)
 
 static int auth_ensure_locked(void)
 {
-    STARTUPINFOA si;
-    PROCESS_INFORMATION pi;
-    int i, prompted = 0;
-    compat_paths();
+    static const xauth_hooks hooks = { auth_show_code, auth_log };
+    static DWORD failed_at;
+    static int failed;
+    char err[400];
     if (auth_read_file()) return 1;
-    DeleteFileA(g_err_z);
-    DeleteFileA(g_code_z);
-    memset(&si, 0, sizeof si);
-    si.cb = sizeof si;
-    memset(&pi, 0, sizeof pi);
+    /* callers queued on the lock behind a failed login shouldn't each open a new one */
+    if (failed && GetTickCount() - failed_at < 60000) return 0;
     xlog("starting Microsoft sign-in");
-    if (!CreateProcessA(NULL, g_auth_cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-        xlog("login spawn failed %lu", (unsigned long)GetLastError());
+    failed = 1;
+    if (!xauth_sign_in(auth_write_path(), &hooks, err, sizeof err)) {
+        xlog("microsoft sign-in failed %s", err);
+        failed_at = GetTickCount();
         return 0;
     }
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    for (i = 0; i < 240; i++) {
-        FILE *err;
-        if (auth_read_file()) {
-            xlog("microsoft sign-in ok xuid=%llu", g_xuid);
-            return 1;
-        }
-        err = fopen(g_err_z, "r");
-        if (err) {
-            char buf[300];
-            if (!fgets(buf, sizeof buf, err)) buf[0] = 0;
-            fclose(err);
-            xlog("microsoft sign-in failed %s", buf);
-            return 0;
-        }
-        if (!prompted && GetFileAttributesA(g_code_z) != INVALID_FILE_ATTRIBUTES) {
-            prompted = 1;
-            CreateThread(NULL, 0, auth_prompt, NULL, 0, NULL);
-        }
-        Sleep(1000);
+    if (!auth_read_file()) {
+        xlog("microsoft sign-in wrote unusable tokens");
+        failed_at = GetTickCount();
+        return 0;
     }
-    xlog("microsoft sign-in timed out");
-    return 0;
+    failed = 0;
+    xlog("microsoft sign-in ok xuid=%llu", g_xuid);
+    return 1;
 }
 
 static const char *auth_token_for(const char *url)
