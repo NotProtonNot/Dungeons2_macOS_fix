@@ -351,11 +351,18 @@ def main():
     finish(poll_msa(started["device_code"], started.get("interval", 5), started.get("expires_in", 900)))
 
 
+def write_error(text):
+    with open(os.path.join(HERE, "login-error.txt"), "w", encoding="utf-8") as handle:
+        handle.write(text[:400])
+
+
 if __name__ == "__main__":
     try:
         main()
     except SystemExit as exc:
         if exc.code not in (0, None):
-            with open(os.path.join(HERE, "login-error.txt"), "w", encoding="utf-8") as handle:
-                handle.write(str(exc.code or exc)[:400])
+            write_error(str(exc.code or exc))
+        raise
+    except Exception as exc:
+        write_error("%s: %s" % (type(exc).__name__, exc))
         raise
