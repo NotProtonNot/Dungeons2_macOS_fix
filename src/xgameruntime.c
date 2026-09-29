@@ -1376,6 +1376,23 @@ static char g_code_z[420];
 static char g_err_z[420];
 static char g_auth_cmd[700];
 
+static int home_from_winehomedir(char *out, size_t outsz)
+{
+    char buf[300];
+    const char *p;
+    size_t i, j = 0;
+    DWORD n = GetEnvironmentVariableA("WINEHOMEDIR", buf, sizeof buf);
+    if (!n || n >= sizeof buf) return 0;
+    p = buf;
+    if (!strncmp(p, "\\??\\", 4)) p += 4;
+    if ((p[0] == 'Z' || p[0] == 'z') && p[1] == ':') p += 2;
+    if (p[0] != '\\' && p[0] != '/') return 0;
+    for (i = 0; p[i] && j + 1 < outsz; i++)
+        out[j++] = (p[i] == '\\') ? '/' : p[i];
+    out[j] = 0;
+    return j > 1;
+}
+
 static void compat_paths(void)
 {
     const char *home = getenv("HOME");
@@ -1384,6 +1401,8 @@ static void compat_paths(void)
     char wine[400];
     size_t i, j;
     if (g_auth_cmd[0]) return;
+    if ((!home || home[0] != '/') && home_from_winehomedir(homebuf, sizeof homebuf))
+        home = homebuf;
     if (!home || home[0] != '/') {
         user = getenv("USER");
         if (!user || !user[0]) user = getenv("LOGNAME");
@@ -1394,6 +1413,7 @@ static void compat_paths(void)
         snprintf(homebuf, sizeof homebuf, "/home/%s", user);
         home = homebuf;
     }
+    xlog("compat home %s", home);
     snprintf(g_compat_unix, sizeof g_compat_unix, "%s/.local/share/dungeons2-compat", home);
     j = 0;
     wine[j++] = 'Z';
@@ -1404,9 +1424,10 @@ static void compat_paths(void)
     snprintf(g_token_z, sizeof g_token_z, "%s\\tokens.txt", wine);
     snprintf(g_code_z, sizeof g_code_z, "%s\\login-code.txt", wine);
     snprintf(g_err_z, sizeof g_err_z, "%s\\login-error.txt", wine);
+    /* Wine execs non-PE images as native binaries through CreateProcess.
+     * start.exe /unix goes through ShellExecute, which CrossOver drops */
     snprintf(g_auth_cmd, sizeof g_auth_cmd,
-             "C:\\windows\\system32\\start.exe /unix /usr/bin/python3 %s/xauth.py",
-             g_compat_unix);
+             "\"Z:\\usr\\bin\\python3\" \"%s/xauth.py\"", g_compat_unix);
 }
 
 static int auth_read_file(void)
