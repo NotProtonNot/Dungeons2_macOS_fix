@@ -16,7 +16,7 @@ Open CrossOver. Select your Steam bottle. Click  'Open C: Drive'. Go to Windows,
 
 Now go back to the top (root) of the C drive. Go to the folder where you have Steam installed. Then go to steamapps/common/Minecraft Dungeons II. Copy the DLL to that folder. Now go to <path to Steam>/steamapps/common/Minecraft Dungeons II/Dungeons/Binaries/Win64 and copy the DLL there as well. You are now done copying files.
 
-You may also want to delete the 'GamingRepair' EXE that the game comes with, as that will slow down game launch and the 'repair' will never work, as you are not actually running Windows. It is located in ```<path to Steam>/steamapps/common/Minecraft Dungeons II\Engine\Extras\ThirdPartyNotUE\GamingRepair\exe```
+You may also want to delete the 'GamingRepair' EXE that the game comes with, as that will slow down game launch and the 'repair' will never work, as you are not actually running Windows. It is located in ```<path to Steam>/steamapps/common/Minecraft Dungeons II\Engine\Extras\ThirdPartyNotUE\GamingRepair\exe```. You could also delete the installscript files in the root of the game's folder instead. Or just wait for the 'repair' to silently fail and the game to then launch.
 
 Go back to CrossOver itself. Go to Wine Configuration, libraries, add 'xgameruntime' in the list. 
 
@@ -28,8 +28,9 @@ Same rough procedure, just different paths. Your Steam library is at ```~/Librar
 
 For the system32 part, go back a few directories to the ```steamapps``` folder. Go to compatdata, 1912411, pfx, drive_c. Then make your way to system32 and paste the file. 
 
-You may also want to delete the 'GamingRepair' EXE that the game comes with, as that will slow down game launch and the 'repair' will never work, as you are not actually running Windows. It is located in ```<path to Steam>/steamapps/common/Minecraft Dungeons II\Engine\Extras\ThirdPartyNotUE\GamingRepair\exe```
+Right click the game in Steam, go to Properties, paste this in as a launch argument: WINEDLLOVERRIDES="xgameruntime=n". This is not strictly speaking required.
 
+You may also want to delete the 'GamingRepair' EXE that the game comes with, as that will slow down game launch and the 'repair' will never work, as you are not actually running Windows. It is located in ```<path to Steam>/steamapps/common/Minecraft Dungeons II\Engine\Extras\ThirdPartyNotUE\GamingRepair\exe```. You could also delete the installscript files in the root of the game's folder instead. Or just wait for the 'repair' to silently fail and the game to then launch.
 
 ## First sign-in
 
