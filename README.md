@@ -8,30 +8,30 @@ On first launch it signs you in with your own Microsoft account through the norm
 
 ## Install
 
-CrossOver is required. Sign-in runs inside the DLL, so nothing else needs installing. Clone this repository into the directory the DLL searches:
+CrossOver is required. Sign-in runs inside the DLL, so nothing else needs installing. 
 
-```sh
-git clone git@github.com:NotProtonNot/Dungeons2_macOS_fix.git ~/.local/share/dungeons2-compat
-cd ~/.local/share/dungeons2-compat
-chmod +x install.sh
-./install.sh
-```
+Download the release zip. Extract it. Copy the DLL to the following locations:
 
-`install.sh` copies `src/xgameruntime.dll` to three places:
+**If using CrossOver itself**
 
-- next to `Dungeons.exe`
-- next to `Dungeons-Win64-Shipping.exe`
-- into the game's Wine prefix, `steamapps/compatdata/1912410/pfx/drive_c/windows/system32`
+Open CrossOver. Select your Steam bottle. Click  'Open C: Drive'. Go to Windows, System32. Copy the DLL into there.
 
-If the game lives in another Steam library, the script reads `libraryfolders.vdf`. Point `STEAM_ROOT` at your Steam install if it is not `~/Library/Application Support/Steam`.
+Now go back to the top (root) of the C drive. Go to the folder where you have Steam installed. Then go to steamapps/common/Minecraft Dungeons II. Copy the DLL to that folder. Now go to <path to Steam>/steamapps/common/Minecraft Dungeons II/Dungeons/Binaries/Win64 and copy the DLL there as well. You are now done copying files.
 
-In Steam, open the game's properties and set the launch option:
+You may also want to delete the 'GamingRepair' EXE that the game comes with, as that will slow down game launch and the 'repair' will never work, as you are not actually running Windows. It is located in ```<path to Steam>/steamapps/common/Minecraft Dungeons II\Engine\Extras\ThirdPartyNotUE\GamingRepair\exe```
 
-```text
-WINEDLLOVERRIDES="xgameruntime=n" 
-```
+Go back to CrossOver itself. Go to Wine Configuration, libraries, add 'xgameruntime' in the list. 
 
-In CrossOver itself, go to Wine Configuration, libraries, add 'xgameruntime' in the list. Put the DLL in the system32 folder for the CrossOver bottle. Put it alongside both game EXEs as well. Launch the game. You may also want to delete the 'GamingRepair' EXE that the game ships, as that will slow down game launch and the 'repair' will never work, as you are not actually running Windows.
+Now you can start Steam. Launch the game.
+
+**If using NotProton**
+
+Same rough procedure, just different paths. Your Steam library is at ```~/Library/Application Support```. This being the Library folder that is in your macOS home folder. You can right click MineCraft Dungeons II in Steam and select 'Manage - Browse Local Files' to get to it easily.
+
+For the system32 part, go back a few directories to the ```steamapps``` folder. Go to compatdata, 1912411, pfx, drive_c. Then make your way to system32 and paste the file. 
+
+You may also want to delete the 'GamingRepair' EXE that the game comes with, as that will slow down game launch and the 'repair' will never work, as you are not actually running Windows. It is located in ```<path to Steam>/steamapps/common/Minecraft Dungeons II\Engine\Extras\ThirdPartyNotUE\GamingRepair\exe```
+
 
 ## First sign-in
 
