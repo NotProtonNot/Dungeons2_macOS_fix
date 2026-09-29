@@ -1,10 +1,12 @@
-# Minecraft Dungeons II on Linux
+# Minecraft Dungeons II on macOS
 
-A local stand-in for Microsoft Gaming Services so Minecraft Dungeons II (Steam app `1912410`) can start under Proton. The game looks for `xgameruntime.dll`. This repository builds that DLL. It does not modify the game and it does not include Microsoft's library.
+**AI USAGE NOTE: This is a fork of Kubas556's Minecraft Dungeons II fix for Linux. That fix appears, to my eyes, to be end-to-end vibe coded and was commited by Cursor Agent. I forked it, fixed major problems with it (online sign in was broken in their version) and adapted it to work on macOS. As the original code was made by AI, this fix is not suitable for upstream.**
+
+A local 'stand in' for Microsoft Gaming Services so Minecraft Dungeons II (Steam app `1912410`) can run under CrossOver. The game looks for `xgameruntime.dll`. This repository builds a replacement for that library. It does not modify the game and it does not include Microsoft's library. 
 
 On first launch it signs you in with your own Microsoft account through the normal device-code page at <https://www.microsoft.com/link>, then caches the Xbox token next to the helper. Later launches reuse that cache until it expires.
 
-## Install
+## Install [WIP - original requires Python, I will eliminate that requirement shortly]
 
 Proton and Python 3 are required. Clone this repository into the directory the DLL searches:
 
@@ -26,10 +28,10 @@ If the game lives in another Steam library, the script reads `libraryfolders.vdf
 In Steam, open the game's properties and set the launch option:
 
 ```text
-WINEDLLOVERRIDES="xgameruntime=n" %command%
+WINEDLLOVERRIDES="xgameruntime=n" 
 ```
 
-Quit the game completely before installing. A running process keeps the old DLL.
+In CrossOver itself, go to Wine Configuration, libraries, add 'xgameruntime' in the list. Put the DLL in the CrossOver's system32 folder and alongside both game DLLs. Launch the game. You may also want to delete the 'GamingRepair' EXE that the game ships, as that will slow down game launch and the 'repair' will never work, as you are not actually running Windows.
 
 ## First sign-in
 
@@ -45,7 +47,3 @@ The DLL already in `src/` is ready to install. To build it yourself you need a M
 x86_64-w64-mingw32-gcc-posix -shared -O2 -Wall -Wextra -o src/xgameruntime.dll src/xgameruntime.c
 ./install.sh
 ```
-
-## What the game gets
-
-The DLL answers the Gaming Services calls this title makes: task queues, a signed-in Xbox user (your real XUID and gamertag from the cache), title id, retail sandbox, persistent local storage, and the HTTPS security settings XCurl asks for before it connects. PlayFab login still uses the Steam session. The Microsoft token is returned only when the game asks for one.
