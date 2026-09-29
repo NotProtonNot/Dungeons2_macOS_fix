@@ -31,7 +31,7 @@ In Steam, open the game's properties and set the launch option:
 WINEDLLOVERRIDES="xgameruntime=n" 
 ```
 
-In CrossOver itself, go to Wine Configuration, libraries, add 'xgameruntime' in the list. Put the DLL in the CrossOver's system32 folder and alongside both game DLLs. Launch the game. You may also want to delete the 'GamingRepair' EXE that the game ships, as that will slow down game launch and the 'repair' will never work, as you are not actually running Windows.
+In CrossOver itself, go to Wine Configuration, libraries, add 'xgameruntime' in the list. Put the DLL in the system32 folder for the CrossOver bottle. Put it alongside both game EXEs as well. Launch the game. You may also want to delete the 'GamingRepair' EXE that the game ships, as that will slow down game launch and the 'repair' will never work, as you are not actually running Windows.
 
 ## First sign-in
 
