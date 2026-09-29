@@ -5,11 +5,15 @@ The browser login uses this game's Microsoft app id. Tokens are written
 for the local runtime; they are never printed.
 """
 import base64
+import hashlib
 import json
 import os
+import secrets
+import struct
 import subprocess
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -21,10 +25,13 @@ TOKEN_PATH = os.path.join(HERE, "tokens.txt")
 CODE_PATH = os.path.join(HERE, "login-code.txt")
 
 
-def post(url, form=None, payload=None):
+def post(url, form=None, payload=None, signed=False):
     if payload is not None:
         data = json.dumps(payload).encode()
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if signed:
+            headers["x-xbl-contract-version"] = "1"
+            headers["Signature"] = xbl_signature("/" + url.split("/", 3)[3], data)
     else:
         data = urllib.parse.urlencode(form).encode()
         headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
@@ -88,11 +95,14 @@ def cached_ok():
     if not os.path.isfile(TOKEN_PATH):
         return False
     exp = 0
+    has_playfab = False
     with open(TOKEN_PATH, "r", encoding="utf-8") as handle:
         for line in handle:
             if line.startswith("exp="):
                 exp = int(line[4:].strip() or "0")
-    return exp > time.time() + 120
+            elif line.startswith("playfab="):
+                has_playfab = True
+    return has_playfab and exp > time.time() + 120
 
 
 def rps_ticket(access):
@@ -118,12 +128,84 @@ def xbox_user(access):
     return result["Token"]
 
 
-def xsts(user_token, relying):
+EC_P = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF
+EC_N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+EC_G = (0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296,
+        0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5)
+PROOF_KEY = secrets.randbelow(EC_N - 1) + 1
+
+
+def ec_add(p, q):
+    if p is None:
+        return q
+    if q is None:
+        return p
+    if p[0] == q[0] and (p[1] + q[1]) % EC_P == 0:
+        return None
+    if p == q:
+        slope = (3 * p[0] * p[0] - 3) * pow(2 * p[1], -1, EC_P) % EC_P
+    else:
+        slope = (q[1] - p[1]) * pow(q[0] - p[0], -1, EC_P) % EC_P
+    x = (slope * slope - p[0] - q[0]) % EC_P
+    return x, (slope * (p[0] - x) - p[1]) % EC_P
+
+
+def ec_mul(k, point):
+    out = None
+    while k:
+        if k & 1:
+            out = ec_add(out, point)
+        point = ec_add(point, point)
+        k >>= 1
+    return out
+
+
+def ec_sign(digest):
+    z = int.from_bytes(digest, "big")
+    while True:
+        k = secrets.randbelow(EC_N - 1) + 1
+        r = ec_mul(k, EC_G)[0] % EC_N
+        s = pow(k, -1, EC_N) * (z + r * PROOF_KEY) % EC_N
+        if r and s:
+            return r.to_bytes(32, "big") + s.to_bytes(32, "big")
+
+
+def xbl_signature(path, body):
+    filetime = (int(time.time()) + 11644473600) * 10000000
+    version, stamp = struct.pack(">I", 1), struct.pack(">Q", filetime)
+    signed = version + b"\0" + stamp + b"\0" + b"POST\0" + path.encode() + b"\0\0" + body + b"\0"
+    return base64.b64encode(version + stamp + ec_sign(hashlib.sha256(signed).digest())).decode()
+
+
+def device_token():
+    def b64url(n):
+        return base64.urlsafe_b64encode(n.to_bytes(32, "big")).rstrip(b"=").decode()
+    x, y = ec_mul(PROOF_KEY, EC_G)
+    result = post("https://device.auth.xboxlive.com/device/authenticate", payload={
+        "Properties": {
+            "AuthMethod": "ProofOfPossession",
+            "Id": "{%s}" % uuid.uuid4(),
+            "DeviceType": "Win32",
+            "Version": "10.0.19045",
+            "ProofKey": {"kty": "EC", "x": b64url(x), "y": b64url(y), "crv": "P-256", "alg": "ES256", "use": "sig"},
+        },
+        "RelyingParty": "http://auth.xboxlive.com",
+        "TokenType": "JWT",
+    }, signed=True)
+    if "Token" not in result:
+        return None, result.get("XErr", result.get("error", result.get("_status")))
+    return result["Token"], None
+
+
+def xsts(user_token, relying, device=None):
+    props = {"SandboxId": "RETAIL", "UserTokens": [user_token]}
+    if device:
+        props["DeviceToken"] = device
     result = post("https://xsts.auth.xboxlive.com/xsts/authorize", payload={
-        "Properties": {"SandboxId": "RETAIL", "UserTokens": [user_token]},
+        "Properties": props,
         "RelyingParty": relying,
         "TokenType": "JWT",
-    })
+    }, signed=bool(device))
     if "Token" not in result:
         return None, result.get("XErr", result.get("error"))
     return result, None
@@ -220,13 +302,17 @@ def finish(msa):
     if not xbox:
         raise SystemExit("Xbox token failed: %s" % xerr)
     minecraft, mc_err = xsts(user_token, "rp://api.minecraftservices.com/")
+    device, pf_err = device_token()
+    playfab = None
+    if device:
+        playfab, pf_err = xsts(user_token, "http://playfab.xboxlive.com/", device)
     header, claim = auth_header(xbox)
     mc_header = auth_header(minecraft)[0] if minecraft else header
     exp = jwt_exp(xbox["Token"])
-    if minecraft:
-        mc_exp = jwt_exp(minecraft["Token"])
-        if mc_exp:
-            exp = min(exp, mc_exp) if exp else mc_exp
+    for extra in (minecraft, playfab):
+        extra_exp = jwt_exp(extra["Token"]) if extra else 0
+        if extra_exp:
+            exp = min(exp, extra_exp) if exp else extra_exp
     if not exp:
         exp = int(time.time()) + 4 * 3600
     write_tokens([
@@ -236,9 +322,11 @@ def finish(msa):
         ("gamertag", claim.get("gtg", "Player")),
         ("xbox", header),
         ("mc", mc_header),
+        ("playfab", auth_header(playfab)[0] if playfab else ""),
         ("msa", msa["access_token"]),
         ("refresh", msa.get("refresh_token", "")),
         ("mc_error", "" if minecraft else str(mc_err or "")),
+        ("playfab_error", "" if playfab else str(pf_err or "")),
     ])
 
 

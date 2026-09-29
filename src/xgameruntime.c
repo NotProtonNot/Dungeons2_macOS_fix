@@ -1354,6 +1354,8 @@ static com_obj gamertag_obj;
 static char g_gamertag[96];
 static char g_xbox_token[12000];
 static char g_mc_token[12000];
+static char g_pf_token[12000];
+static int g_pf_seen;
 static char g_msa_token[8000];
 static unsigned long long g_xuid;
 static long long g_token_exp;
@@ -1370,6 +1372,7 @@ static void auth_apply_line(char *line)
     else if (!strcmp(line, "gamertag")) snprintf(g_gamertag, sizeof g_gamertag, "%s", val);
     else if (!strcmp(line, "xbox")) snprintf(g_xbox_token, sizeof g_xbox_token, "%s", val);
     else if (!strcmp(line, "mc")) snprintf(g_mc_token, sizeof g_mc_token, "%s", val);
+    else if (!strcmp(line, "playfab")) { snprintf(g_pf_token, sizeof g_pf_token, "%s", val); g_pf_seen = 1; }
     else if (!strcmp(line, "msa")) snprintf(g_msa_token, sizeof g_msa_token, "%s", val);
 }
 
@@ -1447,7 +1450,8 @@ static int auth_read_file(void)
         log_once("auth file missing");
         return 0;
     }
-    g_xbox_token[0] = g_mc_token[0] = g_msa_token[0] = g_gamertag[0] = 0;
+    g_xbox_token[0] = g_mc_token[0] = g_pf_token[0] = g_msa_token[0] = g_gamertag[0] = 0;
+    g_pf_seen = 0;
     g_xuid = 0;
     g_token_exp = 0;
     while (fgets(line, sizeof line, f)) {
@@ -1456,7 +1460,8 @@ static int auth_read_file(void)
         auth_apply_line(line);
     }
     fclose(f);
-    g_auth_loaded = g_xbox_token[0] && g_token_exp > (long long)time(NULL) + 30;
+    /* auth refresh */
+    g_auth_loaded = g_xbox_token[0] && g_pf_seen && g_token_exp > (long long)time(NULL) + 30;
     if (g_auth_loaded) log_once("auth file loaded");
     else log_once("auth file unusable");
     return g_auth_loaded;
@@ -1529,6 +1534,8 @@ static const char *auth_token_for(const char *url)
     if (url && (strstr(url, "minecraft") || strstr(url, "Minecraft"))) {
         if (g_mc_token[0]) return g_mc_token;
     }
+    /* PlayFab only decrypts tokens for its own relying party */
+    if (url && strstr(url, "playfab") && g_pf_token[0]) return g_pf_token;
     return g_xbox_token;
 }
 
