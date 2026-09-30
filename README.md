@@ -26,7 +26,7 @@ Now you can start Steam. Launch the game.
 
 Same rough procedure, just different paths. Your Steam library is at ```~/Library/Application Support```. This being the Library folder that is in your macOS home folder. You can right click MineCraft Dungeons II in Steam and select 'Manage - Browse Local Files' to get to it easily.
 
-For the system32 part, go back a few directories to the ```steamapps``` folder. Go to compatdata, 1912411, pfx, drive_c. Then make your way to system32 and paste the file. 
+For the system32 part, go back a few directories to the ```steamapps``` folder. Go to compatdata, 1912410, pfx, drive_c. Then make your way to system32 and paste the file. 
 
 Right click the game in Steam, go to Properties, paste this in as a launch argument: WINEDLLOVERRIDES="xgameruntime=n". This part is not strictly speaking required.
 
