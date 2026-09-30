@@ -123,7 +123,51 @@ static queue_obj *g_process_queue;
 static DWORD g_tls = TLS_OUT_OF_INDEXES;
 static int g_inited;
 
-static const char *PLS_PATH = "C:\\users\\steamuser\\AppData\\Local\\Dungeons2\\PLS";
+static void xlog(const char *fmt, ...);
+
+/* Proton prefixes use steamuser, CrossOver bottles use crossover, so ask Wine */
+static char g_appdata_dir[MAX_PATH - 20];
+static char g_appdata_tokens[MAX_PATH];
+static char g_pls_path[MAX_PATH];
+
+static BOOL CALLBACK appdata_init(INIT_ONCE *once, void *param, void **ctx)
+{
+    char base[MAX_PATH - 32];
+    DWORD n;
+    (void)once; (void)param; (void)ctx;
+    n = GetEnvironmentVariableA("LOCALAPPDATA", base, sizeof base);
+    if (!n || n >= sizeof base) {
+        n = GetEnvironmentVariableA("USERPROFILE", base, sizeof base - 16);
+        if (n && n < sizeof base - 16) strcat(base, "\\AppData\\Local");
+        else snprintf(base, sizeof base, "C:\\users\\steamuser\\AppData\\Local");
+    }
+    snprintf(g_appdata_dir, sizeof g_appdata_dir, "%s\\Dungeons2", base);
+    snprintf(g_appdata_tokens, sizeof g_appdata_tokens, "%s\\tokens.txt", g_appdata_dir);
+    snprintf(g_pls_path, sizeof g_pls_path, "%s\\PLS", g_appdata_dir);
+    xlog("appdata %s", g_appdata_dir);
+    return TRUE;
+}
+
+static void appdata_paths(void)
+{
+    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
+    InitOnceExecuteOnce(&once, appdata_init, NULL, NULL);
+}
+
+/* CreateDirectoryA won't make parents */
+static void make_dirs(const char *path)
+{
+    char buf[MAX_PATH];
+    char *p;
+    snprintf(buf, sizeof buf, "%s", path);
+    for (p = buf + 3; *p; p++) {
+        if (*p != '\\') continue;
+        *p = 0;
+        CreateDirectoryA(buf, NULL);
+        *p = '\\';
+    }
+    CreateDirectoryA(buf, NULL);
+}
 
 static void xlog(const char *fmt, ...)
 {
@@ -1267,19 +1311,21 @@ static HRESULT WINAPI pls_size(void *self, SIZE_T *pathSize)
 {
     (void)self;
     if (!pathSize) return E_POINTER_;
-    *pathSize = strlen(PLS_PATH) + 1;
+    appdata_paths();
+    *pathSize = strlen(g_pls_path) + 1;
     return S_OK;
 }
 static HRESULT WINAPI pls_path(void *self, SIZE_T pathSize, char *path, SIZE_T *used)
 {
-    SIZE_T n = strlen(PLS_PATH) + 1;
+    SIZE_T n;
     (void)self;
     log_once("XPersistentLocalStorageGetPath");
-    CreateDirectoryA("C:\\users\\steamuser\\AppData\\Local\\Dungeons2", NULL);
-    CreateDirectoryA(PLS_PATH, NULL);
+    appdata_paths();
+    n = strlen(g_pls_path) + 1;
+    make_dirs(g_pls_path);
     if (used) *used = n;
     if (!path || pathSize < n) return E_INSUFFICIENT_;
-    memcpy(path, PLS_PATH, n);
+    memcpy(path, g_pls_path, n);
     return S_OK;
 }
 static HRESULT WINAPI pls_space(void *self, UINT64 *info)
@@ -1378,9 +1424,6 @@ static void auth_apply_line(char *line)
     else if (!strcmp(line, "msa")) snprintf(g_msa_token, sizeof g_msa_token, "%s", val);
 }
 
-#define APPDATA_DIR "C:\\users\\steamuser\\AppData\\Local\\Dungeons2"
-#define APPDATA_TOKENS APPDATA_DIR "\\tokens.txt"
-
 static char g_compat_unix[360];
 static char g_token_z[420];
 
@@ -1439,7 +1482,8 @@ static int auth_read_file(void)
     char line[16000];
     int i;
     compat_paths();
-    paths[0] = APPDATA_TOKENS;
+    appdata_paths();
+    paths[0] = g_appdata_tokens;
     paths[1] = g_token_z;
     for (i = 0; i < 2 && !f; i++) f = fopen(paths[i], "r");
     if (!f) {
@@ -1493,14 +1537,15 @@ static const char *auth_write_path(void)
     char *slash;
     DWORD attr;
     compat_paths();
-    if (GetFileAttributesA(APPDATA_TOKENS) != INVALID_FILE_ATTRIBUTES) return APPDATA_TOKENS;
+    appdata_paths();
+    if (GetFileAttributesA(g_appdata_tokens) != INVALID_FILE_ATTRIBUTES) return g_appdata_tokens;
     snprintf(dir, sizeof dir, "%s", g_token_z);
     slash = strrchr(dir, '\\');
     if (slash) *slash = 0;
     attr = GetFileAttributesA(dir);
     if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) return g_token_z;
-    CreateDirectoryA(APPDATA_DIR, NULL);
-    return APPDATA_TOKENS;
+    make_dirs(g_appdata_dir);
+    return g_appdata_tokens;
 }
 
 static SRWLOCK g_auth_lock = SRWLOCK_INIT;
