@@ -1,9 +1,6 @@
-/* Microsoft account sign-in for the stand-in runtime.
- *
- * Uses this game's Microsoft app id with the device-code flow, then trades the
- * MSA ticket for Xbox Live tokens. Tokens go to tokens.txt and are never logged.
- * Everything runs on Wine's WinHTTP and BCrypt, so the host needs nothing
- * installed. */
+/* Microsoft/Xbox sign in as a stand in for Gaming Services.
+ * Signs in with a device code under the game's own Microsoft app id, then exchanges
+ * the Microsoft token for Xbox Live, Minecraft and PlayFab tokens. */
 #include <windows.h>
 #include <bcrypt.h>
 #include <winhttp.h>
@@ -118,31 +115,25 @@ static void b64_encode(sbuf *out, const unsigned char *in, size_t len, int url)
     }
 }
 
-static size_t b64url_decode(const char *in, size_t len, unsigned char *out, size_t outsz)
+/* json */
+
+/* JSON string contents, escaped. */
+static void sb_json(sbuf *b, const char *s)
 {
-    unsigned v = 0;
-    int bits = 0;
-    size_t i, n = 0;
-    for (i = 0; i < len; i++) {
-        char c = in[i];
-        int d;
-        if (c >= 'A' && c <= 'Z') d = c - 'A';
-        else if (c >= 'a' && c <= 'z') d = c - 'a' + 26;
-        else if (c >= '0' && c <= '9') d = c - '0' + 52;
-        else if (c == '-' || c == '+') d = 62;
-        else if (c == '_' || c == '/') d = 63;
-        else continue;
-        v = (v << 6) | (unsigned)d;
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            if (n < outsz) out[n++] = (unsigned char)(v >> bits);
+    static const char hex[] = "0123456789abcdef";
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') {
+            char e[2] = { '\\', (char)c };
+            sb_add(b, e, 2);
+        } else if (c < 0x20) {
+            char e[6] = { '\\', 'u', '0', '0', hex[c >> 4], hex[c & 15] };
+            sb_add(b, e, 6);
+        } else {
+            sb_add(b, &c, 1);
         }
     }
-    return n;
 }
-
-/* JSON: flat key lookup. Every key read here is unique within its response. */
 
 static const char *json_skip_string(const char *p)
 {
@@ -177,7 +168,8 @@ static unsigned hex4(const char *p)
     return v;
 }
 
-/* Returns a malloc'd copy of the string or scalar value for key, or NULL. */
+/* malloc'd value for key, or NULL. Takes the first "key": at any depth,
+ * fine because none of the keys read here show up twice in a response. */
 static char *json_get(const char *json, const char *key)
 {
     size_t klen = strlen(key);
@@ -300,9 +292,9 @@ static int proof_key(void)
         BCryptCloseAlgorithmProvider(alg, 0);
         return 0;
     }
-    /* the algorithm handle has to outlive the key */
     memcpy(g_proof_x, blob + sizeof(BCRYPT_ECCKEY_BLOB), 32);
     memcpy(g_proof_y, blob + sizeof(BCRYPT_ECCKEY_BLOB) + 32, 32);
+    /* alg stays open, BCrypt keys can't outlive their algorithm handle */
     g_proof_key = key;
     return 1;
 }
@@ -313,7 +305,8 @@ static void put_be(unsigned char *p, unsigned long long v, int len)
     for (i = len - 1; i >= 0; i--, v >>= 8) p[i] = (unsigned char)v;
 }
 
-/* Xbox request signing: ES256 over version, filetime, method, path, auth header and body. */
+/* Xbox request signing: ES256 over version, filetime, method, path, auth header and body.
+ * None of these requests send an Authorization header, so that field is empty. */
 static int xbl_signature(const wchar_t *path, const char *body, sbuf *out)
 {
     FILETIME ft;
@@ -368,7 +361,7 @@ static char *http_post(const char *url, const char *type, const char *body, int 
     wchar_t *wurl = widen(url), *wheaders = NULL;
     HINTERNET ses = NULL, con = NULL, req = NULL;
     sbuf headers = { 0 }, resp = { 0 };
-    DWORD code = 0, len = sizeof code;
+    DWORD code = 0, len = sizeof code, gle = 0;
     *status = 0;
     if (!body || !wurl) {
         free(wurl);
@@ -380,7 +373,7 @@ static char *http_post(const char *url, const char *type, const char *body, int 
     uc.dwHostNameLength = sizeof host / sizeof host[0];
     uc.lpszUrlPath = path;
     uc.dwUrlPathLength = sizeof path / sizeof path[0];
-    if (!WinHttpCrackUrl(wurl, 0, 0, &uc)) goto done;
+    if (!WinHttpCrackUrl(wurl, 0, 0, &uc)) { gle = GetLastError(); goto done; }
 
     sb_printf(&headers, "Content-Type: %s\r\nAccept: application/json\r\n", type);
     if (signed_req) {
@@ -397,19 +390,23 @@ static char *http_post(const char *url, const char *type, const char *body, int 
 
     ses = WinHttpOpen(L"Dungeons2-compat", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, NULL, NULL, 0);
     if (!ses) ses = WinHttpOpen(L"Dungeons2-compat", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
-    if (!ses) goto done;
+    if (!ses) { gle = GetLastError(); goto done; }
     WinHttpSetTimeouts(ses, 30000, 30000, 30000, 30000);
     con = WinHttpConnect(ses, host, uc.nPort, 0);
-    if (!con) goto done;
+    if (!con) { gle = GetLastError(); goto done; }
     req = WinHttpOpenRequest(con, L"POST", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                              uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0);
-    if (!req) goto done;
+    if (!req) { gle = GetLastError(); goto done; }
     if (!WinHttpSendRequest(req, wheaders, (DWORD)-1L, (void *)body, (DWORD)strlen(body), (DWORD)strlen(body), 0) ||
-        !WinHttpReceiveResponse(req, NULL))
+        !WinHttpReceiveResponse(req, NULL)) {
+        gle = GetLastError();
         goto done;
+    }
     if (!WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
-                             &code, &len, WINHTTP_NO_HEADER_INDEX))
+                             &code, &len, WINHTTP_NO_HEADER_INDEX)) {
+        gle = GetLastError();
         goto done;
+    }
     for (;;) {
         char chunk[8192];
         DWORD got = 0;
@@ -420,7 +417,10 @@ static char *http_post(const char *url, const char *type, const char *body, int 
     *status = (int)code;
 
 done:
-    if (!*status) say("xauth POST %s failed %lu", url, (unsigned long)GetLastError());
+    if (!*status) {
+        if (gle) say("xauth POST %s failed %lu", url, (unsigned long)gle);
+        else say("xauth POST %s never sent", url);
+    }
     if (req) WinHttpCloseHandle(req);
     if (con) WinHttpCloseHandle(con);
     if (ses) WinHttpCloseHandle(ses);
@@ -446,25 +446,28 @@ static char *post_json(const char *url, const char *json, int signed_req, int *s
 
 /* Xbox Live */
 
-static long long jwt_exp(const char *token)
+/* Unix time of an XSTS response's NotAfter, 0 if missing. The tokens are
+ * encrypted, so this is the only place the expiry shows up. */
+static long long not_after(const char *doc)
 {
-    const char *semi, *dot1, *dot2;
-    unsigned char payload[4096];
-    size_t n;
-    char *exp;
-    long long v;
-    if (!token) return 0;
-    semi = strrchr(token, ';');
-    if (semi) token = semi + 1;
-    dot1 = strchr(token, '.');
-    if (!dot1) return 0;
-    dot2 = strchr(dot1 + 1, '.');
-    if (!dot2) return 0;
-    n = b64url_decode(dot1 + 1, (size_t)(dot2 - dot1 - 1), payload, sizeof payload - 1);
-    payload[n] = 0;
-    exp = json_get((const char *)payload, "exp");
-    v = exp ? atoll(exp) : 0;
-    free(exp);
+    char *s = json_get(doc, "NotAfter");
+    SYSTEMTIME st = { 0 };
+    FILETIME ft;
+    int y, mo, d, h, mi, sec;
+    long long v = 0;
+    if (s && sscanf(s, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &sec) == 6) {
+        st.wYear = (WORD)y;
+        st.wMonth = (WORD)mo;
+        st.wDay = (WORD)d;
+        st.wHour = (WORD)h;
+        st.wMinute = (WORD)mi;
+        st.wSecond = (WORD)sec;
+        if (SystemTimeToFileTime(&st, &ft)) {
+            unsigned long long t = ((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+            v = (long long)(t / 10000000ULL) - 11644473600LL;
+        }
+    }
+    free(s);
     return v;
 }
 
@@ -476,9 +479,10 @@ static char *xbox_user(const char *access, char *err, size_t errsz)
     int status;
     if (strncmp(access, "t=", 2) && strncmp(access, "d=", 2))
         prefix = strncmp(access, "eyJ", 3) ? "t=" : "d=";
-    sb_printf(&body, "{\"Properties\":{\"AuthMethod\":\"RPS\",\"SiteName\":\"user.auth.xboxlive.com\","
-                     "\"RpsTicket\":\"%s%s\"},\"RelyingParty\":\"http://auth.xboxlive.com\",\"TokenType\":\"JWT\"}",
-              prefix, access);
+    sb_str(&body, "{\"Properties\":{\"AuthMethod\":\"RPS\",\"SiteName\":\"user.auth.xboxlive.com\",\"RpsTicket\":\"");
+    sb_str(&body, prefix);
+    sb_json(&body, access);
+    sb_str(&body, "\"},\"RelyingParty\":\"http://auth.xboxlive.com\",\"TokenType\":\"JWT\"}");
     resp = post_json("https://user.auth.xboxlive.com/user/authenticate", body.p, 0, &status);
     free(body.p);
     tok = json_get(resp, "Token");
@@ -530,9 +534,13 @@ static char *xsts(const char *user_token, const char *relying, const char *devic
     char *resp, *tok;
     int status;
     sb_str(&body, "{\"Properties\":{\"SandboxId\":\"RETAIL\",\"UserTokens\":[\"");
-    sb_str(&body, user_token);
+    sb_json(&body, user_token);
     sb_str(&body, "\"]");
-    if (device) sb_printf(&body, ",\"DeviceToken\":\"%s\"", device);
+    if (device) {
+        sb_str(&body, ",\"DeviceToken\":\"");
+        sb_json(&body, device);
+        sb_str(&body, "\"");
+    }
     sb_printf(&body, "},\"RelyingParty\":\"%s\",\"TokenType\":\"JWT\"}", relying);
     resp = post_json("https://xsts.auth.xboxlive.com/xsts/authorize", body.p, device != NULL, &status);
     free(body.p);
@@ -561,8 +569,8 @@ static char *auth_header(const char *doc)
 
 typedef char *(CDECL *unix_name_fn)(const WCHAR *);
 
-/* Tokens are the user's credentials; keep them out of other accounts' reach.
- * Wine doesn't wait on native children, so the chmod lands shortly after. */
+/* Real Unix chmod so other accounts on the Mac can't read the tokens. Wine
+ * can't wait on a native child, so the mode changes a moment after this returns. */
 static void native_chmod(const char *mode, const char *path)
 {
     static unix_name_fn unix_name;
@@ -669,10 +677,10 @@ static int finish(const char *token_path, const char *access, const char *refres
         goto done;
     }
 
-    exp = jwt_exp(xbox_h);
-    e = mc_h ? jwt_exp(mc_h) : 0;
+    exp = not_after(xbox);
+    e = mc ? not_after(mc) : 0;
     if (e && (!exp || e < exp)) exp = e;
-    e = pf_h ? jwt_exp(pf_h) : 0;
+    e = pf ? not_after(pf) : 0;
     if (e && (!exp || e < exp)) exp = e;
     if (!exp) exp = (long long)time(NULL) + 4 * 3600;
 
@@ -691,17 +699,35 @@ static int finish(const char *token_path, const char *access, const char *refres
     if (!ok) snprintf(err, errsz, "could not write %s", token_path);
 
 done:
-    if (out.p) SecureZeroMemory(out.p, out.n);
     free(out.p);
     free(user); free(xbox); free(mc); free(device); free(pf);
     free(xbox_h); free(mc_h); free(pf_h); free(xuid); free(uhs); free(gtg);
     return ok;
 }
 
+/* Updates the refresh= line in tokens.txt */
+static void save_refresh(const char *path, const char *refresh)
+{
+    FILE *f = fopen(path, "r");
+    char line[16000];
+    sbuf out = { 0 };
+    if (f) {
+        while (fgets(line, sizeof line, f))
+            if (strncmp(line, "refresh=", 8)) sb_str(&out, line);
+        fclose(f);
+    }
+    if (out.n && out.p[out.n - 1] != '\n') sb_str(&out, "\n");
+    sb_printf(&out, "refresh=%s\n", refresh);
+    if (out.p) write_tokens(path, out.p);
+    free(out.p);
+}
+
 static int finish_msa(const char *token_path, const char *resp, const char *old_refresh, char *err, size_t errsz)
 {
     char *access = json_get(resp, "access_token"), *refresh = json_get(resp, "refresh_token");
     int ok = access && finish(token_path, access, refresh ? refresh : old_refresh, err, errsz);
+    /* Microsoft may have retired the old refresh token by now */
+    if (!ok && refresh && (!old_refresh || strcmp(refresh, old_refresh))) save_refresh(token_path, refresh);
     free(access);
     free(refresh);
     return ok;
@@ -813,28 +839,35 @@ done:
     return ok;
 }
 
-/* 1 ok, 0 refresh token rejected, -1 failed for a reason a new login won't fix */
+/* 1 ok, 0 refresh token rejected, -1 failed with the reason in err */
 static int refresh_login(const char *token_path, const char *refresh, char *err, size_t errsz)
 {
     sbuf form = { 0 };
-    char *resp, *access;
-    int status, ok = 0;
+    char *resp, *access, *error;
+    int status, ok = -1;
     sb_form(&form, "client_id", CLIENT);
     sb_form(&form, "grant_type", "refresh_token");
     sb_form(&form, "refresh_token", refresh);
     sb_form(&form, "scope", SCOPE);
     if (!form.p) return -1;
     resp = post_form("https://login.live.com/oauth20_token.srf", form.p, &status);
-    SecureZeroMemory(form.p, form.n);
     free(form.p);
     access = json_get(resp, "access_token");
-    if (access) ok = finish_msa(token_path, resp, refresh, err, errsz) ? 1 : -1;
-    else if (!status) {
+    error = json_get(resp, "error");
+    if (access) {
+        ok = finish_msa(token_path, resp, refresh, err, errsz) ? 1 : -1;
+    } else if (!status) {
         copy_str(err, errsz, "login.live.com unreachable");
-        ok = -1;
-    } else say("xauth refresh rejected (HTTP %d)", status);
+    } else if (error && !strcmp(error, "invalid_grant")) {
+        say("xauth refresh token rejected");
+        ok = 0;
+    } else {
+        char why[200];
+        json_reason(resp, status, MSA_ERR, why, sizeof why);
+        snprintf(err, errsz, "Microsoft refresh failed: %s", why);
+    }
     free(access);
-    if (resp) SecureZeroMemory(resp, strlen(resp));
+    free(error);
     free(resp);
     return ok;
 }
@@ -849,7 +882,6 @@ int xauth_sign_in(const char *token_path, const xauth_hooks *hooks, char *err, s
     refresh = read_refresh(token_path);
     if (refresh) {
         ok = refresh_login(token_path, refresh, err, errsz);
-        SecureZeroMemory(refresh, strlen(refresh));
         free(refresh);
         if (ok) return ok > 0;
     }

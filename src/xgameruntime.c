@@ -2373,6 +2373,13 @@ static BOOL WINAPI hook_set_option(void *handle, DWORD option, void *buffer, DWO
     BOOL ok;
     if (option == WINHTTP_OPT_IPV6_FAST_FALLBACK)
         return TRUE; /* wine returns 12009; XCurl treats that as fatal and never connects */
+    /* Never handed to wine. CrossOver 26 rejects it and XCurl drops the request
+     * (error 0063). CrossOver 27 accepts it, but its gzip reader stops before the
+     * chunked terminator, pools the connection with that still unread, and the
+     * next request on it fails with 12152. Without it WinHTTP never sends
+     * Accept-Encoding, so replies come back uncompressed. */
+    if (option == WINHTTP_OPT_DECOMPRESSION)
+        return TRUE;
     if (option == WINHTTP_OPT_PROTOCOLS && buffer && length >= sizeof(DWORD)) {
         if ((*(DWORD *)buffer & WINHTTP_TLS12) == 0) {
             fixed = WINHTTP_TLS12 | WINHTTP_TLS13;
@@ -2381,13 +2388,6 @@ static BOOL WINAPI hook_set_option(void *handle, DWORD option, void *buffer, DWO
         }
     }
     ok = real_set_option(handle, option, buffer, length);
-    /* CrossOver 26 has no decompression option and XCurl drops the request
-     * over it (error 0063). Without it WinHTTP never sends Accept-Encoding,
-     * so replies come back uncompressed anyway */
-    if (!ok && option == WINHTTP_OPT_DECOMPRESSION && GetLastError() == 12009) {
-        log_once("wine has no http decompression, ignoring");
-        return TRUE;
-    }
     if (!ok) {
         static int logged;
         DWORD err = GetLastError();
