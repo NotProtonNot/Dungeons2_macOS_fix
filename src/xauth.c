@@ -681,7 +681,7 @@ static int finish(const char *token_path, const char *access, const char *refres
     sb_printf(&out, "uhs=%s\n", uhs ? uhs : "");
     sb_printf(&out, "gamertag=%s\n", gtg ? gtg : "Player");
     sb_printf(&out, "xbox=%s\n", xbox_h);
-    sb_printf(&out, "mc=%s\n", mc_h ? mc_h : xbox_h);
+    sb_printf(&out, "mc=%s\n", mc_h ? mc_h : "");
     sb_printf(&out, "playfab=%s\n", pf_h ? pf_h : "");
     sb_printf(&out, "msa=%s\n", access);
     sb_printf(&out, "refresh=%s\n", refresh ? refresh : "");

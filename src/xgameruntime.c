@@ -114,6 +114,7 @@ typedef struct async_state {
     int cleaned;
     int completion_queued;
     void *payload;
+    char *owned;    /* freed with the state, for per-request token copies */
     char name[48];
 } async_state;
 
@@ -383,6 +384,10 @@ static void cleanup_state(async_state *st)
         data.async = block;
         data.context = context;
         provider(OP_CLEANUP, &data);
+    }
+    if (st->owned) {
+        SecureZeroMemory(st->owned, strlen(st->owned));
+        free(st->owned);
     }
     st->magic = 0;
     free(st);
@@ -1399,29 +1404,49 @@ static HRESULT WINAPI error_qi(com_obj *self, const GUID *iid, void **out)
 static com_obj user_obj;
 static com_obj gamertag_obj;
 
-static char g_gamertag[96];
-static char g_xbox_token[12000];
-static char g_mc_token[12000];
-static char g_pf_token[12000];
-static int g_pf_seen;
-static char g_msa_token[8000];
-static unsigned long long g_xuid;
-static long long g_token_exp;
-static int g_auth_loaded;
+/* Game threads read these while the file gets re-read, so a load parses into a
+ * scratch copy and swaps it in under g_tok_lock */
+typedef struct tok_set {
+    char gamertag[96];
+    char xbox[12000];
+    char mc[12000];
+    char pf[12000];
+    char msa[8000];
+    char mc_err[200];
+    char pf_err[200];
+    unsigned long long xuid;
+    long long exp;
+    int pf_seen;
+} tok_set;
 
-static void auth_apply_line(char *line)
+static tok_set g_tok;
+static int g_auth_loaded;
+static SRWLOCK g_tok_lock = SRWLOCK_INIT;
+
+static void tok_apply_line(tok_set *t, char *line)
 {
-    char *eq = strchr(line, '=');
+    char *val, *eq = strchr(line, '=');
     if (!eq) return;
     *eq = 0;
-    char *val = eq + 1;
-    if (!strcmp(line, "exp")) g_token_exp = atoll(val);
-    else if (!strcmp(line, "xuid")) g_xuid = strtoull(val, NULL, 10);
-    else if (!strcmp(line, "gamertag")) snprintf(g_gamertag, sizeof g_gamertag, "%s", val);
-    else if (!strcmp(line, "xbox")) snprintf(g_xbox_token, sizeof g_xbox_token, "%s", val);
-    else if (!strcmp(line, "mc")) snprintf(g_mc_token, sizeof g_mc_token, "%s", val);
-    else if (!strcmp(line, "playfab")) { snprintf(g_pf_token, sizeof g_pf_token, "%s", val); g_pf_seen = 1; }
-    else if (!strcmp(line, "msa")) snprintf(g_msa_token, sizeof g_msa_token, "%s", val);
+    val = eq + 1;
+    if (!strcmp(line, "exp")) t->exp = atoll(val);
+    else if (!strcmp(line, "xuid")) t->xuid = strtoull(val, NULL, 10);
+    else if (!strcmp(line, "gamertag")) snprintf(t->gamertag, sizeof t->gamertag, "%s", val);
+    else if (!strcmp(line, "xbox")) snprintf(t->xbox, sizeof t->xbox, "%s", val);
+    else if (!strcmp(line, "mc")) snprintf(t->mc, sizeof t->mc, "%s", val);
+    else if (!strcmp(line, "playfab")) { snprintf(t->pf, sizeof t->pf, "%s", val); t->pf_seen = 1; }
+    else if (!strcmp(line, "msa")) snprintf(t->msa, sizeof t->msa, "%s", val);
+    else if (!strcmp(line, "mc_error")) snprintf(t->mc_err, sizeof t->mc_err, "%s", val);
+    else if (!strcmp(line, "playfab_error")) snprintf(t->pf_err, sizeof t->pf_err, "%s", val);
+}
+
+static unsigned long long auth_xuid(void)
+{
+    unsigned long long x;
+    AcquireSRWLockShared(&g_tok_lock);
+    x = g_tok.xuid;
+    ReleaseSRWLockShared(&g_tok_lock);
+    return x;
 }
 
 static char g_compat_unix[360];
@@ -1475,12 +1500,13 @@ static void compat_paths(void)
     snprintf(g_token_z, sizeof g_token_z, "%s\\tokens.txt", wine);
 }
 
-static int auth_read_file(void)
+static int auth_load_file(void)
 {
     const char *paths[2];
     FILE *f = NULL;
+    tok_set *t;
     char line[16000];
-    int i;
+    int i, loaded;
     compat_paths();
     appdata_paths();
     paths[0] = g_appdata_tokens;
@@ -1490,21 +1516,39 @@ static int auth_read_file(void)
         log_once("auth file missing");
         return 0;
     }
-    g_xbox_token[0] = g_mc_token[0] = g_pf_token[0] = g_msa_token[0] = g_gamertag[0] = 0;
-    g_pf_seen = 0;
-    g_xuid = 0;
-    g_token_exp = 0;
+    t = calloc(1, sizeof *t);
+    if (!t) {
+        fclose(f);
+        return 0;
+    }
     while (fgets(line, sizeof line, f)) {
         size_t n = strlen(line);
         while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
-        auth_apply_line(line);
+        tok_apply_line(t, line);
     }
     fclose(f);
+    SecureZeroMemory(line, sizeof line);
     /* auth refresh */
-    g_auth_loaded = g_xbox_token[0] && g_pf_seen && g_token_exp > (long long)time(NULL) + 30;
-    if (g_auth_loaded) log_once("auth file loaded");
+    loaded = t->xbox[0] && t->pf_seen && t->exp > (long long)time(NULL) + 30;
+    AcquireSRWLockExclusive(&g_tok_lock);
+    g_tok = *t;
+    g_auth_loaded = loaded;
+    ReleaseSRWLockExclusive(&g_tok_lock);
+    SecureZeroMemory(t, sizeof *t);
+    free(t);
+    if (loaded) log_once("auth file loaded");
     else log_once("auth file unusable");
-    return g_auth_loaded;
+    return loaded;
+}
+
+/* only touches the file when there's nothing usable in memory */
+static int auth_read_file(void)
+{
+    int ok;
+    AcquireSRWLockShared(&g_tok_lock);
+    ok = g_auth_loaded && g_tok.exp > (long long)time(NULL) + 30;
+    ReleaseSRWLockShared(&g_tok_lock);
+    return ok ? 1 : auth_load_file();
 }
 
 static char g_login_msg[400];
@@ -1528,6 +1572,56 @@ static void auth_show_code(const char *url, const char *code)
 }
 
 static void auth_log(const char *msg) { xlog("%s", msg); }
+
+static const char *xerr_hint(const char *why)
+{
+    if (strstr(why, "2148916233"))
+        return "This Microsoft account has no Xbox profile yet. Sign in once at "
+               "https://www.xbox.com to create one, then restart the game.";
+    if (strstr(why, "2148916238"))
+        return "This is a child account. An adult in its Microsoft family group "
+               "has to allow it to play online.";
+    if (strstr(why, "2148916235"))
+        return "Xbox Live isn't available in this account's country or region.";
+    if (strstr(why, "2148916236") || strstr(why, "2148916237"))
+        return "This account needs adult verification on xbox.com before it can sign in.";
+    if (strstr(why, "could not write"))
+        return "The sign-in tokens couldn't be saved. Check that the Wine prefix "
+               "or CrossOver bottle is writable.";
+    return NULL;
+}
+
+static DWORD WINAPI auth_warn_box(void *msg)
+{
+    MessageBoxA(NULL, msg, "Minecraft Dungeons II online",
+                MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST);
+    free(msg);
+    return 0;
+}
+
+/* The game only shows a bare error code, so say what went wrong. Same text
+ * isn't shown twice, since offline play retries every minute */
+static void auth_warn(const char *why)
+{
+    static SRWLOCK lock = SRWLOCK_INIT;
+    static char last[400];
+    const char *hint = xerr_hint(why);
+    char *msg;
+    HANDLE t;
+    int seen;
+    AcquireSRWLockExclusive(&lock);
+    seen = !strcmp(last, why);
+    if (!seen) snprintf(last, sizeof last, "%s", why);
+    ReleaseSRWLockExclusive(&lock);
+    if (seen) return;
+    msg = malloc(1024);
+    if (!msg) return;
+    snprintf(msg, 1024, "Online play isn't available.\n\n%s%s%s\n\nMore detail is in drive_c/xgr.log.",
+             hint ? hint : why, hint ? "\n\n" : "", hint ? why : "");
+    t = CreateThread(NULL, 0, auth_warn_box, msg, 0, NULL);
+    if (t) CloseHandle(t);
+    else free(msg);
+}
 
 /* Same order auth_read_file reads: AppData copy, else the clone directory,
  * else a new AppData copy when there's no clone */
@@ -1592,34 +1686,81 @@ static int auth_ensure_locked(void)
     if (!xauth_sign_in(auth_write_path(), &hooks, err, sizeof err)) {
         xlog("microsoft sign-in failed %s", err);
         failed_at = GetTickCount();
+        auth_warn(err);
         return 0;
     }
-    if (!auth_read_file()) {
+    if (!auth_load_file()) {
         xlog("microsoft sign-in wrote unusable tokens");
         failed_at = GetTickCount();
+        auth_warn("Sign-in finished but the saved tokens aren't usable.");
         return 0;
     }
     failed = 0;
-    xlog("microsoft sign-in ok xuid=%llu", g_xuid);
+    xlog("microsoft sign-in ok xuid=%llu", auth_xuid());
     return 1;
 }
 
-static const char *auth_token_for(const char *url)
+enum { TOK_NONE, TOK_XBOX, TOK_MC, TOK_PF };
+
+static int host_is(const char *host, size_t n, const char *domain)
 {
-    if (url && (strstr(url, "minecraft") || strstr(url, "Minecraft"))) {
-        if (g_mc_token[0]) return g_mc_token;
-    }
-    /* PlayFab only decrypts tokens for its own relying party */
-    if (url && strstr(url, "playfab") && g_pf_token[0]) return g_pf_token;
-    return g_xbox_token;
+    size_t d = strlen(domain);
+    if (n < d || _strnicmp(host + n - d, domain, d)) return 0;
+    return n == d || host[n - d - 1] == '.';
 }
 
-static const char *gamertag_for(UINT32 component)
+/* Real Xbox only hands tokens to relying parties the title set up, so don't
+ * give one to whatever host asks */
+static int token_kind(const char *url)
 {
-    if (component == 2) return "";
+    const char *h;
+    size_t auth_len, n;
+    if (!url || !(h = strstr(url, "://"))) return TOK_NONE;
+    h += 3;
+    auth_len = strcspn(h, "/?#");
+    if (memchr(h, '@', auth_len)) return TOK_NONE;
+    n = strcspn(h, ":/?#");
+    if (host_is(h, n, "minecraftservices.com")) return TOK_MC;
+    /* PlayFab only decrypts tokens for its own relying party */
+    if (host_is(h, n, "playfabapi.com")) return TOK_PF;
+    if (host_is(h, n, "xboxlive.com")) return TOK_XBOX;
+    return TOK_NONE;
+}
+
+/* Heap copy in *out, "" for hosts that get no token. 0 with a reason when the
+ * token that host needs was never issued; sending a different one only gets
+ * a vague error from the server */
+static int auth_token_for(const char *url, char **out, char *why, size_t whysz)
+{
+    const char *src = "", *err = "", *name = "";
+    int kind = token_kind(url);
+    AcquireSRWLockShared(&g_tok_lock);
+    switch (kind) {
+    case TOK_MC: src = g_tok.mc; err = g_tok.mc_err; name = "Minecraft"; break;
+    case TOK_PF: src = g_tok.pf; err = g_tok.pf_err; name = "PlayFab"; break;
+    case TOK_XBOX: src = g_tok.xbox; name = "Xbox"; break;
+    }
+    if (kind != TOK_NONE && !src[0]) {
+        snprintf(why, whysz, "No %s token: %s", name, err[0] ? err : "not issued at sign-in");
+        *out = NULL;
+    } else {
+        *out = _strdup(src);
+        if (!*out) snprintf(why, whysz, "out of memory");
+    }
+    ReleaseSRWLockShared(&g_tok_lock);
+    return *out != NULL;
+}
+
+static void gamertag_copy(UINT32 component, char *out, size_t outsz)
+{
+    if (component == 2) {
+        out[0] = 0;
+        return;
+    }
     auth_read_file();
-    if (g_gamertag[0]) return g_gamertag;
-    return "Player";
+    AcquireSRWLockShared(&g_tok_lock);
+    snprintf(out, outsz, "%s", g_tok.gamertag[0] ? g_tok.gamertag : "Player");
+    ReleaseSRWLockShared(&g_tok_lock);
 }
 
 static HRESULT WINAPI user_dup(void *self, void *user, void **out)
@@ -1699,7 +1840,8 @@ static HRESULT WINAPI user_get_id(void *self, void *user, UINT64 *id)
     log_once("XUserGetId");
     if (!id) return E_POINTER_;
     auth_read_file();
-    *id = g_xuid ? g_xuid : 1;
+    *id = auth_xuid();
+    if (!*id) *id = 1;
     xlog("XUserGetId value %llu", (unsigned long long)*id);
     return S_OK;
 }
@@ -1708,7 +1850,7 @@ static HRESULT WINAPI user_find_id(void *self, UINT64 id, void **handle)
     (void)self;
     if (!handle) return E_POINTER_;
     auth_read_file();
-    if (id != 1 && id != g_xuid) {
+    if (id != 1 && id != auth_xuid()) {
         xlog("XUserFindUserById miss %llu", (unsigned long long)id);
         return E_FAIL_;
     }
@@ -1788,6 +1930,8 @@ static HRESULT WINAPI token_provider(UINT32 op, const XAsyncProviderData *data)
     async_state *st;
     const char *url;
     const char *tok;
+    char *copy;
+    char why[300];
     if (op == OP_CLEANUP) {
         free(data->context);
         return S_OK;
@@ -1814,9 +1958,20 @@ static HRESULT WINAPI token_provider(UINT32 op, const XAsyncProviderData *data)
         complete_async(data->async, E_FAIL_, 0);
         return S_OK;
     }
-    tok = auth_token_for(url);
-    if (st) st->payload = (void *)tok;
-    complete_async(data->async, S_OK, sizeof(token_blob) + strlen(tok) + 2);
+    if (!st) {
+        complete_async(data->async, E_FAIL_, 0);
+        return S_OK;
+    }
+    if (!auth_token_for(url, &copy, why, sizeof why)) {
+        xlog("token refused %s", why);
+        auth_warn(why);
+        complete_async(data->async, E_FAIL_, 0);
+        return S_OK;
+    }
+    if (!copy[0]) xlog("no token for this host");
+    st->owned = copy;
+    st->payload = copy;
+    complete_async(data->async, S_OK, sizeof(token_blob) + strlen(copy) + 2);
     return S_OK;
 }
 
@@ -1968,8 +2123,19 @@ static HRESULT WINAPI msa_provider(UINT32 op, const XAsyncProviderData *data)
         complete_async(data->async, E_FAIL_, 0);
         return S_OK;
     }
-    if (st) st->payload = g_msa_token;
-    complete_async(data->async, S_OK, strlen(g_msa_token) + 1);
+    if (!st) {
+        complete_async(data->async, E_FAIL_, 0);
+        return S_OK;
+    }
+    AcquireSRWLockShared(&g_tok_lock);
+    st->owned = _strdup(g_tok.msa);
+    ReleaseSRWLockShared(&g_tok_lock);
+    if (!st->owned) {
+        complete_async(data->async, E_FAIL_, 0);
+        return S_OK;
+    }
+    st->payload = st->owned;
+    complete_async(data->async, S_OK, strlen(st->owned) + 1);
     return S_OK;
 }
 static HRESULT WINAPI user_msa_async(void *self, void *user, UINT32 opts, const char *scope, XAsyncBlock *async)
@@ -2092,8 +2258,10 @@ static HRESULT WINAPI user_qi(com_obj *self, const GUID *iid, void **out)
 
 static HRESULT WINAPI tag_get(void *self, void *user, UINT32 component, SIZE_T cap, char *buf, SIZE_T *used)
 {
-    const char *s = gamertag_for(component);
-    SIZE_T n = strlen(s) + 1;
+    char s[96];
+    SIZE_T n;
+    gamertag_copy(component, s, sizeof s);
+    n = strlen(s) + 1;
     (void)self; (void)user;
     xlog("gamertag component %lu", (unsigned long)component);
     if (used) *used = n;
@@ -2171,6 +2339,7 @@ typedef struct net_sec_info {
 #define WINHTTP_TLS13 0x2000u
 #define WINHTTP_OPT_PROTOCOLS 84u
 #define WINHTTP_OPT_IPV6_FAST_FALLBACK 140u
+#define WINHTTP_OPT_DECOMPRESSION 118u
 
 static BOOL (WINAPI *real_set_option)(void *, DWORD, void *, DWORD);
 static void *(WINAPI *real_connect)(void *, const WCHAR *, unsigned short, DWORD);
@@ -2201,15 +2370,82 @@ static void http_status_set(void *req, int code)
 static BOOL WINAPI hook_set_option(void *handle, DWORD option, void *buffer, DWORD length)
 {
     DWORD fixed;
+    BOOL ok;
     if (option == WINHTTP_OPT_IPV6_FAST_FALLBACK)
         return TRUE; /* wine returns 12009; XCurl treats that as fatal and never connects */
     if (option == WINHTTP_OPT_PROTOCOLS && buffer && length >= sizeof(DWORD)) {
         if ((*(DWORD *)buffer & WINHTTP_TLS12) == 0) {
             fixed = WINHTTP_TLS12 | WINHTTP_TLS13;
-            return real_set_option(handle, option, &fixed, sizeof fixed);
+            buffer = &fixed;
+            length = sizeof fixed;
         }
     }
-    return real_set_option(handle, option, buffer, length);
+    ok = real_set_option(handle, option, buffer, length);
+    /* CrossOver 26 has no decompression option and XCurl drops the request
+     * over it (error 0063). Without it WinHTTP never sends Accept-Encoding,
+     * so replies come back uncompressed anyway */
+    if (!ok && option == WINHTTP_OPT_DECOMPRESSION && GetLastError() == 12009) {
+        log_once("wine has no http decompression, ignoring");
+        return TRUE;
+    }
+    if (!ok) {
+        static int logged;
+        DWORD err = GetLastError();
+        if (logged < 20) { logged++; xlog("http option %lu failed %lu", (unsigned long)option, (unsigned long)err); }
+        SetLastError(err);
+    }
+    return ok;
+}
+
+/* XCurl runs WinHTTP async, so failures only show up in its status callback */
+typedef void (CALLBACK *http_status_cb)(void *, DWORD_PTR, DWORD, void *, DWORD);
+static http_status_cb xcurl_cb;
+static http_status_cb (WINAPI *real_set_callback)(void *, http_status_cb, DWORD, DWORD_PTR);
+
+static void CALLBACK wrap_status_cb(void *h, DWORD_PTR ctx, DWORD status, void *info, DWORD len)
+{
+    static int logged;
+    if (status == 0x00200000 && info && logged < 30) { /* REQUEST_ERROR */
+        logged++;
+        xlog("http async error api=%lu err=%lu", (unsigned long)((DWORD_PTR *)info)[0],
+             (unsigned long)((DWORD *)info)[2]);
+    } else if (status == 0x00010000 && logged < 30) { /* SECURE_FAILURE */
+        logged++;
+        xlog("http tls failure flags=%08lx", info ? (unsigned long)*(DWORD *)info : 0ul);
+    }
+    if (xcurl_cb) xcurl_cb(h, ctx, status, info, len);
+}
+static http_status_cb WINAPI hook_set_callback(void *h, http_status_cb cb, DWORD flags, DWORD_PTR reserved)
+{
+    http_status_cb prev;
+    if (cb && cb != wrap_status_cb) {
+        xcurl_cb = cb;
+        cb = wrap_status_cb;
+    }
+    prev = real_set_callback(h, cb, flags, reserved);
+    return prev == wrap_status_cb ? xcurl_cb : prev;
+}
+
+/* import slot by name, for imports without a known fixed offset */
+static void **iat_slot(HMODULE mod, const char *dll, const char *fn)
+{
+    unsigned char *base = (unsigned char *)mod;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
+    IMAGE_DATA_DIRECTORY *dir = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    IMAGE_IMPORT_DESCRIPTOR *imp;
+    if (!dir->VirtualAddress) return NULL;
+    for (imp = (IMAGE_IMPORT_DESCRIPTOR *)(base + dir->VirtualAddress); imp->Name; imp++) {
+        IMAGE_THUNK_DATA *names, *slots;
+        if (_stricmp((char *)base + imp->Name, dll) || !imp->OriginalFirstThunk) continue;
+        names = (IMAGE_THUNK_DATA *)(base + imp->OriginalFirstThunk);
+        slots = (IMAGE_THUNK_DATA *)(base + imp->FirstThunk);
+        for (; names->u1.AddressOfData; names++, slots++) {
+            if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal)) continue;
+            if (!strcmp((char *)((IMAGE_IMPORT_BY_NAME *)(base + names->u1.AddressOfData))->Name, fn))
+                return (void **)&slots->u1.Function;
+        }
+    }
+    return NULL;
 }
 static void *WINAPI hook_connect(void *session, const WCHAR *host, unsigned short port, DWORD reserved)
 {
@@ -2294,6 +2530,12 @@ static void hook_xcurl_winhttp(void)
     patch_slot(mod, 0x1f488, (void *)hook_recv, (void **)&real_recv);
     memcpy(&real_query, (unsigned char *)mod + 0x1f4d0, sizeof real_query);
     patch_slot(mod, 0x1f4e8, (void *)hook_read, (void **)&real_read);
+    {
+        void **slot = iat_slot(mod, "winhttp.dll", "WinHttpSetStatusCallback");
+        if (slot) patch_slot(mod, (unsigned)((unsigned char *)slot - (unsigned char *)mod),
+                             (void *)hook_set_callback, (void **)&real_set_callback);
+        else xlog("no WinHttpSetStatusCallback import");
+    }
     xlog("hooked XCurl WinHTTP");
 }
 
