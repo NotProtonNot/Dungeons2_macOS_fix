@@ -4,6 +4,10 @@
 
 A local 'stand in' for Microsoft Gaming Services so Minecraft Dungeons II can run under CrossOver. The game looks for `xgameruntime.dll`, which is a GDK component that is not present on non-Windows platforms. Some GDK games ship with deliberate Proton/Wine GDK compatibility, this one rudely does not. So this is a replacement for the missing component.
 
+## Mac app
+
+Rather not copy files by hand? [Dungeons II Fixer](mac-app/) is a small Mac app that applies this fix to a CrossOver bottle in one click, and can remove it again. Please don't contact CodeWeavers support about a patched bottle.
+
 ## Installation Instructions
 
 CrossOver is required. This may work with other tools, it may not. 
