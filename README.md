@@ -1,3 +1,5 @@
+**UPDATE: Microsoft updated this game with support for Linux, making this tool irrelevant. The game now works on macOS without any modifications**
+
 # Minecraft Dungeons II on macOS
 
 **AI USAGE NOTE: This is a fork of Kubas556's Minecraft Dungeons II fix for Linux. That fix appears, to my eyes, to be end-to-end vibe coded and was commited by Cursor Agent. I forked it, fixed major problems with it (online sign in was broken in their version, among other things) and adapted it to work on macOS. As the original code was made by AI, this fix is not suitable for upstreaming Wine itself...**
